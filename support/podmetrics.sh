@@ -41,6 +41,7 @@ PLAY_APPS=(
 )
 DAYS=7
 COLLECT=true
+APPS=false
 
 show_help() {
     echo "Usage: $0 [options] [snap ...]"
@@ -52,6 +53,7 @@ show_help() {
     echo "  -f, --file <csv>   CSV file to create/update (default: ${CSV})."
     echo "  -d, --days <n>     Number of recent days to fetch (default: ${DAYS})."
     echo "  -s, --summary      Only summarise the existing CSV, no collection."
+    echo "  -a, --apps         Summarise one row per app, sources across columns."
     echo "  -h, --help         Show this help message."
     exit 0
 }
@@ -77,6 +79,10 @@ while [[ "$1" != "" ]]; do
             ;;
         -s | --summary)
             COLLECT=false
+            shift
+            ;;
+        -a | --apps)
+            APPS=true
             shift
             ;;
         -h | --help)
@@ -251,6 +257,56 @@ summarise() {
           }'
 }
 
+# One row per app with each source's figures across the columns:
+# snap installed base (latest) and new devices, play installs
+# (latest), and web downloads per platform, all over the whole CSV.
+# Activity totals the acquisitions (snap new, play installs, web
+# downloads); installed base is a level, not activity, so is excluded.
+
+summarise_apps() {
+    if [ ! -f "${CSV}" ]; then
+        echo "No metrics file ${CSV} found." >&2
+        exit 1
+    fi
+    echo "Metrics by app from ${CSV} since $(tail -n +2 "${CSV}" | cut -d, -f1 | sort | head -1)"
+    echo ""
+    tail -n +2 "${CSV}" | awk -F, '
+      {
+        app[$3] = 1
+        if ($2 == "snap" && $4 == "installed_base" && $1 >= sd[$3]) { sd[$3] = $1; v[$3, "si"] = $5 }
+        else if ($2 == "snap" && $4 == "new")                         v[$3, "sn"] += $5
+        else if ($2 == "play" && $4 == "installs" && $1 >= pd[$3])    { pd[$3] = $1; v[$3, "pi"] = $5 }
+        else if ($2 == "web")                                         v[$3, "w" $4] += $5
+        else next
+        has[$3, ($2 == "snap" && $4 == "installed_base") ? "si" : ($2 == "snap") ? "sn" : ($2 == "play") ? "pi" : "w" $4] = 1
+      }
+      END {
+        n = split("si sn pi wandroid wlinux wmacos wwindows", c, " ")
+        for (a in app) {
+          line = a; act = 0
+          for (i = 1; i <= n; i++) {
+            line = line "," (((a, c[i]) in has) ? v[a, c[i]] : "-")
+            if (c[i] != "si") act += v[a, c[i]]
+          }
+          print line "," act
+        }
+      }' | sort -t, -k9,9nr -k1,1 |
+        awk -F, '
+          BEGIN {
+            f = "%-12s %9s %8s %8s %8s %8s %8s %8s %9s\n"
+            printf f, "", "Snap", "Snap", "Play", "Web", "Web", "Web", "Web", ""
+            printf f, "App", "Installed", "New", "Installs", "Android", "Linux", "macOS", "Windows", "Activity"
+            printf f, "---", "---------", "----", "--------", "-------", "-----", "-----", "-------", "--------"
+          }
+          {
+            printf f, $1, $2, $3, $4, $5, $6, $7, $8, $9
+            for (i = 2; i <= 9; i++) t[i] += $i
+          }
+          END {
+            printf f, "TOTAL", t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9]
+          }'
+}
+
 if ${COLLECT}; then
     if ! command -v snapcraft > /dev/null || ! command -v jq > /dev/null; then
         echo "Warning: snapcraft and jq are required for snap metrics, skipping." >&2
@@ -276,4 +332,8 @@ if ${COLLECT}; then
     echo "" >&2
 fi
 
-summarise
+if ${APPS}; then
+    summarise_apps
+else
+    summarise
+fi
