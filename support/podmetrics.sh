@@ -540,7 +540,7 @@ summarise_pub() {
 # One row per GitHub repository: the latest stars, forks, watchers,
 # open issues and release downloads, and the views and clones over
 # the 14 days to the latest traffic date, with their unique visitors
-# and cloners as GitHub reports them.
+# and cloners as GitHub reports them. Ordered by clones.
 
 summarise_github() {
     if [ ! -f "${CSV}" ]; then
@@ -572,7 +572,7 @@ summarise_github() {
                  v[r, "stars"], v[r, "forks"], v[r, "watchers"], v[r, "issues"],
                  v[r, "release_downloads"], views, v[r, "visitors_14d"], clones, v[r, "cloners_14d"]
         }
-      }' | sort -t, -k3,3nr -k1,1 |
+      }' | sort -t, -k10,10nr -k1,1 |
         awk -F, '
           BEGIN {
             f = "%-24s %-10s %5s %5s %8s %6s %9s %6s %8s %6s %8s\n"
@@ -589,8 +589,8 @@ summarise_github() {
           }'
 }
 
-# One page A4 landscape PDF report of the app and pub.dev package
-# metrics from the current data file, drawn with R and ggplot2.
+# One page A4 landscape PDF report of the app, pub.dev package and
+# GitHub metrics from the current data file, drawn with R and ggplot2.
 
 report() {
     if [ ! -f "${CSV}" ]; then
@@ -630,6 +630,9 @@ theme_pm <- theme_minimal(base_size = 9) +
         legend.text      = element_text(colour = ink2),
         legend.position  = "top", legend.justification = "left",
         legend.title     = element_blank(),
+        legend.key.size  = unit(8, "pt"),
+        legend.margin    = margin(0, 0, 0, 0),
+        legend.box.spacing = unit(2, "pt"),
         plot.title       = element_text(colour = ink, face = "bold", size = 11),
         plot.subtitle    = element_text(colour = ink2, size = 8),
         plot.caption     = element_text(colour = ink2, size = 7, hjust = 0))
@@ -641,7 +644,7 @@ empty <- function(title, msg) {
           plot.background = element_rect(fill = surf, colour = NA))
 }
 
-apps <- filter(d, source != "pub")
+apps <- filter(d, !source %in% c("pub", "github"))
 pub  <- filter(d, source == "pub")
 
 # Panel 1: activity over the last 30 days by app and source. Play is
@@ -664,7 +667,7 @@ if (nrow(act) == 0) {
   p1 <- empty("Activity, last 30 days", "No activity in the last 30 days")
 } else {
   tot <- act %>% group_by(package) %>% summarise(total = sum(value)) %>%
-    arrange(desc(total)) %>% head(15)
+    arrange(desc(total)) %>% head(12)
   act <- filter(act, package %in% tot$package) %>%
     mutate(package = factor(package, levels = rev(tot$package)),
            kind = factor(kind, levels = rev(kinds)))
@@ -747,6 +750,38 @@ if (nrow(d30) == 0) {
     theme_pm + theme(panel.grid.major.y = element_blank())
 }
 
+# Panels 5 and 6: GitHub clones and views over the 14 days to each
+# repository's latest traffic date, and the latest stars and forks,
+# for the top ten repositories of each.
+
+gh <- filter(d, source == "github")
+traffic <- gh %>% filter(metric %in% c("clones", "views")) %>%
+  group_by(package) %>% filter(date > max(date) - 14) %>%
+  group_by(package, metric) %>% summarise(value = sum(value), .groups = "drop")
+pair <- function(df, keys, labels, title, subtitle) {
+  if (nrow(df) == 0) return(empty(title, "No GitHub data"))
+  df <- tidyr::complete(df, package, metric = keys, fill = list(value = 0))
+  top <- df %>% filter(metric == keys[1]) %>% arrange(desc(value), package) %>% head(10)
+  df <- df %>% filter(package %in% top$package) %>%
+    mutate(package = factor(package, levels = rev(top$package)),
+           metric = factor(labels[match(metric, keys)], levels = rev(labels)))
+  ggplot(df, aes(value, package, fill = metric)) +
+    geom_col(position = position_dodge(width = 0.8), width = 0.75, colour = surf, linewidth = 0.3) +
+    geom_text(aes(label = num(value)), position = position_dodge(width = 0.8),
+              hjust = -0.15, size = 2.3, colour = ink) +
+    scale_fill_manual(values = setNames(cat8[1:2], labels), breaks = labels) +
+    scale_x_continuous(labels = label_comma(), expand = expansion(mult = c(0, 0.12))) +
+    labs(title = title, subtitle = subtitle, x = NULL, y = NULL) +
+    theme_pm + theme(panel.grid.major.y = element_blank())
+}
+p5 <- pair(traffic, c("clones", "views"), c("Clones", "Views"),
+           "GitHub traffic, last 14 days", "Top ten repositories by clones")
+p6 <- pair(gh %>% filter(metric %in% c("stars", "forks")) %>%
+             group_by(package, metric) %>% filter(date == max(date)) %>% ungroup() %>%
+             select(package, metric, value),
+           c("stars", "forks"), c("Stars", "Forks"),
+           "GitHub stars and forks", "Top ten repositories by stars")
+
 # Headline figures for the page subtitle.
 
 latest_inst <- inst %>% group_by(package) %>% filter(date == max(date)) %>% pull(value)
@@ -754,9 +789,10 @@ head_line <- paste0(
   "As at ", format(today, "%d %B %Y"),
   "   |   Snap installed devices ", num(sum(latest_inst)),
   "   |   App activity, 30 days ", num(sum(act$value)),
-  "   |   pub.dev downloads, 30 days ", num(sum(d30$value)))
+  "   |   pub.dev downloads, 30 days ", num(sum(d30$value)),
+  "   |   GitHub clones, 14 days ", num(sum(traffic$value[traffic$metric == "clones"])))
 
-page <- (p1 | p2) / (p3 | p4) +
+page <- (p1 | p2) / (p3 | p4) / (p5 | p6) +
   plot_annotation(title = "Package Metrics", subtitle = head_line,
                   caption = paste("Generated by podmetrics.sh from", args[3]),
                   theme = theme(plot.title = element_text(colour = ink, face = "bold", size = 16),
