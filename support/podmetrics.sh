@@ -29,7 +29,7 @@
 # whole log (kept 365 days) so earlier days are simply refreshed.
 # Metrics are per platform: android, linux, macos, windows.
 
-CSV="podmetrics.csv"
+CSV="${HOME}/.local/share/podmetrics/podmetrics.csv"
 
 WEB_HOST=solidcommunity.au
 WEB_LOGS="/var/log/caddy/installers*.log*"
@@ -183,6 +183,7 @@ collect_web() {
 
 merge_csv() {
     local tmp
+    mkdir -p "$(dirname "${CSV}")"
     tmp=$(mktemp)
     {
         cat -
