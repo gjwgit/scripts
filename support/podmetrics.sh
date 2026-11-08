@@ -55,6 +55,7 @@ APP_LOGS="/var/log/caddy/apps*.log*"
 
 PLAY_APPS=(
     innerpod=com.togaware.innerpod
+    radiopod=com.togaware.radiopod
 )
 
 # pub.dev publishers whose packages are collected.
@@ -621,6 +622,17 @@ today <- max(d$date)
 from  <- today - 29
 num   <- function(x) format(round(x), big.mark = ",", trim = TRUE)
 
+# Change since the previous day, shown as " (+n)" beside a figure and
+# omitted when there is no change. For a running total (installed
+# base, lifetime installs, 30 day downloads, stars) it is the latest
+# snapshot less the one before.
+
+dlt <- function(x) ifelse(is.na(x) | round(x) == 0, "",
+                          paste0(" (", ifelse(x > 0, "+", "−"), num(abs(x)), ")"))
+step <- function(df) df %>% group_by(package, metric) %>% arrange(date) %>%
+  summarise(date = last(date), change = if (n() > 1) last(value) - nth(value, -2) else NA_real_,
+            value = last(value), .groups = "drop")
+
 theme_pm <- theme_minimal(base_size = 9) +
   theme(plot.background  = element_rect(fill = surf, colour = NA),
         panel.grid.minor = element_blank(),
@@ -663,24 +675,43 @@ act <- bind_rows(
   filter(value > 0)
 kinds <- c("Snap new devices", "Play installs", "Web downloads", "Web app starts")
 
-if (nrow(act) == 0) {
+# The day's activity for each app, from the latest day each source
+# reports, and the lifetime Play installs with their latest change.
+
+flows <- apps %>% filter((source == "snap" & metric == "new") | source == "web" |
+                         (source == "webapp" & metric == "starts")) %>%
+  group_by(source) %>% filter(date == max(date)) %>% ungroup()
+lifetime <- apps %>% filter(source == "play", metric == "installs") %>% step()
+day <- bind_rows(select(flows, package, change = value), select(lifetime, package, change)) %>%
+  group_by(package) %>% summarise(change = sum(change, na.rm = TRUE), .groups = "drop")
+
+if (nrow(act) == 0 && nrow(lifetime) == 0) {
   p1 <- empty("Activity, last 30 days", "No activity in the last 30 days")
 } else {
   tot <- act %>% group_by(package) %>% summarise(total = sum(value)) %>%
-    arrange(desc(total)) %>% head(12)
+    full_join(select(lifetime, package, play = value), by = "package") %>%
+    left_join(day, by = "package") %>%
+    mutate(total = coalesce(total, 0),
+           label = paste0(num(total), dlt(change),
+                          ifelse(is.na(play), "", paste0("   Play ", num(play), " lifetime")))) %>%
+    arrange(desc(total)) %>% head(20)
   act <- filter(act, package %in% tot$package) %>%
     mutate(package = factor(package, levels = rev(tot$package)),
            kind = factor(kind, levels = rev(kinds)))
+  tot <- mutate(tot, package = factor(package, levels = rev(tot$package)))
   p1 <- ggplot(act, aes(value, package)) +
     geom_col(aes(fill = kind), width = 0.7, colour = surf, linewidth = 0.4) +
-    geom_text(data = tot, aes(total, package, label = num(total)),
-              hjust = -0.15, size = 2.6, colour = ink) +
+    geom_text(data = tot, aes(total, package, label = label),
+              hjust = -0.08, size = 2.6, colour = ink) +
     scale_fill_manual(values = setNames(cat8[1:4], kinds), breaks = intersect(kinds, act$kind)) +
-    scale_x_continuous(labels = label_comma(), expand = expansion(mult = c(0, 0.12))) +
+    scale_y_discrete(drop = FALSE) +
+    scale_x_continuous(labels = label_comma(), expand = expansion(mult = c(0, 0.3))) +
     labs(title = "Activity, last 30 days",
-         subtitle = paste0(format(from, "%d %b"), " to ", format(today, "%d %b %Y"), ", top apps by total"),
+         subtitle = paste0(format(from, "%d %b"), " to ", format(today, "%d %b %Y"),
+                           ", top apps by total, (+n) the latest day"),
          x = NULL, y = NULL,
-         caption = "Web downloads logged from 3 Nov 2026, web app starts from 4 Nov 2026.") +
+         caption = paste("Play counts the growth in lifetime installs over the 30 days.",
+                         "Web downloads logged from 3 Nov 2026, web app starts from 4 Nov 2026.")) +
     theme_pm + theme(panel.grid.major.y = element_blank())
 }
 
@@ -694,10 +725,10 @@ if (nrow(inst) == 0) {
     ungroup() %>% arrange(desc(value)) %>% head(6)
   inst <- filter(inst, package %in% top$package)
   cols <- setNames(cat8[seq_along(sort(top$package))], sort(top$package))
-  ends <- inst %>% group_by(package) %>% filter(date == max(date))
+  ends <- step(inst)
   p2 <- ggplot(inst, aes(date, value, colour = package)) +
     geom_line(linewidth = 0.7) +
-    geom_text_repel(data = ends, aes(label = paste0(package, " ", num(value))),
+    geom_text_repel(data = ends, aes(label = paste0(package, " ", num(value), dlt(change))),
                     hjust = 0, nudge_x = 2, direction = "y", size = 2.6,
                     colour = ink, segment.colour = rule, min.segment.length = 0) +
     scale_colour_manual(values = cols) +
@@ -711,8 +742,13 @@ if (nrow(inst) == 0) {
 }
 
 # Panel 3: total weekly pub.dev downloads over the past 52 weeks.
+# Packages report on differing days, several times a week, with
+# spurious zeros, so drop the zeros, average each package within a
+# calendar week (starting Monday) and sum over the packages.
 
-wk <- pub %>% filter(metric == "weekly_downloads") %>%
+wk <- pub %>% filter(metric == "weekly_downloads", value > 0) %>%
+  mutate(date = date - (as.integer(format(date, "%u")) - 1)) %>%
+  group_by(date, package) %>% summarise(value = mean(value), .groups = "drop") %>%
   group_by(date) %>% summarise(value = sum(value), .groups = "drop") %>%
   filter(date > max(date) - 364)
 if (nrow(wk) == 0) {
@@ -734,65 +770,82 @@ if (nrow(wk) == 0) {
 
 # Panel 4: 30 day downloads per pub.dev package.
 
-d30 <- pub %>% filter(metric == "downloads_30d") %>% group_by(package) %>%
-  filter(date == max(date)) %>% ungroup()
+d30 <- pub %>% filter(metric == "downloads_30d") %>% step()
 if (nrow(d30) == 0) {
   p4 <- empty("pub.dev downloads, last 30 days", "No pub.dev data")
 } else {
   d30 <- mutate(d30, package = reorder(package, value))
   p4 <- ggplot(d30, aes(value, package)) +
     geom_col(fill = cat8[1], width = 0.7) +
-    geom_text(aes(label = num(value)), hjust = -0.15, size = 2.6, colour = ink) +
-    scale_x_continuous(labels = label_comma(), expand = expansion(mult = c(0, 0.12))) +
+    geom_text(aes(label = paste0(num(value), dlt(change))), hjust = -0.1, size = 2.6, colour = ink) +
+    scale_x_continuous(labels = label_comma(), expand = expansion(mult = c(0, 0.2))) +
     labs(title = "pub.dev downloads, last 30 days",
-         subtitle = paste0("Per package, as at ", format(max(d30$date), "%d %b %Y")),
+         subtitle = paste0("Per package, as at ", format(max(d30$date), "%d %b %Y"),
+                           ", (+n) since the day before"),
          x = NULL, y = NULL) +
     theme_pm + theme(panel.grid.major.y = element_blank())
 }
 
-# Panels 5 and 6: GitHub clones and views over the 14 days to each
-# repository's latest traffic date, and the latest stars and forks,
-# for the top ten repositories of each.
+# Panels 5 and 7: the latest GitHub stars and forks for the top ten
+# repositories by each, and the clones over the 14 days to each
+# repository's latest traffic date for the page headline.
 
 gh <- filter(d, source == "github")
 traffic <- gh %>% filter(metric %in% c("clones", "views")) %>%
   group_by(package) %>% filter(date > max(date) - 14) %>%
   group_by(package, metric) %>% summarise(value = sum(value), .groups = "drop")
-pair <- function(df, keys, labels, title, subtitle) {
+latest <- function(key, title, colour) {
+  df <- gh %>% filter(metric == key) %>% step() %>%
+    filter(value > 0) %>% arrange(desc(value), package) %>% head(10)
   if (nrow(df) == 0) return(empty(title, "No GitHub data"))
-  df <- tidyr::complete(df, package, metric = keys, fill = list(value = 0))
-  top <- df %>% filter(metric == keys[1]) %>% arrange(desc(value), package) %>% head(10)
-  df <- df %>% filter(package %in% top$package) %>%
-    mutate(package = factor(package, levels = rev(top$package)),
-           metric = factor(labels[match(metric, keys)], levels = rev(labels)))
-  ggplot(df, aes(value, package, fill = metric)) +
-    geom_col(position = position_dodge(width = 0.8), width = 0.75, colour = surf, linewidth = 0.3) +
-    geom_text(aes(label = num(value)), position = position_dodge(width = 0.8),
-              hjust = -0.15, size = 2.3, colour = ink) +
-    scale_fill_manual(values = setNames(cat8[1:2], labels), breaks = labels) +
-    scale_x_continuous(labels = label_comma(), expand = expansion(mult = c(0, 0.12))) +
-    labs(title = title, subtitle = subtitle, x = NULL, y = NULL) +
+  df <- mutate(df, package = factor(package, levels = rev(package)))
+  ggplot(df, aes(value, package)) +
+    geom_col(fill = colour, width = 0.7) +
+    geom_text(aes(label = paste0(num(value), dlt(change))), hjust = -0.1, size = 2.3, colour = ink) +
+    scale_x_continuous(labels = label_comma(), expand = expansion(mult = c(0, 0.2))) +
+    labs(title = title, subtitle = "Top ten, (+n) since the day before",
+         x = NULL, y = NULL) +
     theme_pm + theme(panel.grid.major.y = element_blank())
 }
-p5 <- pair(traffic, c("clones", "views"), c("Clones", "Views"),
-           "GitHub traffic, last 14 days", "Top ten repositories by clones")
-p6 <- pair(gh %>% filter(metric %in% c("stars", "forks")) %>%
-             group_by(package, metric) %>% filter(date == max(date)) %>% ungroup() %>%
-             select(package, metric, value),
-           c("stars", "forks"), c("Stars", "Forks"),
-           "GitHub stars and forks", "Top ten repositories by stars")
+p5 <- latest("stars", "GitHub stars", cat8[1])
+p7 <- latest("forks", "GitHub forks", cat8[1])
 
-# Headline figures for the page subtitle.
+# Panel 6: GitHub views over the 14 days to each repository's latest
+# traffic date, with the views on that latest day.
 
-latest_inst <- inst %>% group_by(package) %>% filter(date == max(date)) %>% pull(value)
+views <- gh %>% filter(metric == "views") %>% group_by(package) %>%
+  filter(date > max(date) - 14) %>%
+  summarise(change = sum(value[date == max(date)]), value = sum(value), .groups = "drop") %>%
+  filter(value > 0) %>% arrange(desc(value), package) %>% head(10)
+if (nrow(views) == 0) {
+  p6 <- empty("GitHub views, last 14 days", "No GitHub traffic data")
+} else {
+  views <- mutate(views, package = factor(package, levels = rev(package)))
+  p6 <- ggplot(views, aes(value, package)) +
+    geom_col(fill = cat8[1], width = 0.7) +
+    geom_text(aes(label = paste0(num(value), dlt(change))), hjust = -0.1, size = 2.3, colour = ink) +
+    scale_x_continuous(labels = label_comma(), expand = expansion(mult = c(0, 0.3))) +
+    labs(title = "GitHub views, last 14 days", subtitle = "Top ten, (+n) the latest day",
+         x = NULL, y = NULL) +
+    theme_pm + theme(panel.grid.major.y = element_blank())
+}
+
+# Headline figures for the page subtitle, each with its change since
+# the day before.
+
 head_line <- paste0(
   "As at ", format(today, "%d %B %Y"),
-  "   |   Snap installed devices ", num(sum(latest_inst)),
-  "   |   App activity, 30 days ", num(sum(act$value)),
-  "   |   pub.dev downloads, 30 days ", num(sum(d30$value)),
+  "   |   Snap installed devices ", num(sum(ends$value)), dlt(sum(ends$change, na.rm = TRUE)),
+  "   |   App activity, 30 days ", num(sum(act$value)), dlt(sum(day$change)),
+  "   |   pub.dev downloads, 30 days ", num(sum(d30$value)), dlt(sum(d30$change, na.rm = TRUE)),
   "   |   GitHub clones, 14 days ", num(sum(traffic$value[traffic$metric == "clones"])))
 
-page <- (p1 | p2) / (p3 | p4) / (p5 | p6) +
+# Activity runs down the left over two rows so it can list more apps,
+# beside the snaps and the GitHub stars and views, with pub.dev and
+# the GitHub forks along the bottom.
+
+page <- wrap_plots(A = p1, B = p2, C = p5, D = p6, E = p3, F = p4, G = p7,
+                   design = "AAAABBBB\nAAAACCDD\nEEEFFFGG") +
   plot_annotation(title = "Package Metrics", subtitle = head_line,
                   caption = paste("Generated by podmetrics.sh from", args[3]),
                   theme = theme(plot.title = element_text(colour = ink, face = "bold", size = 16),
