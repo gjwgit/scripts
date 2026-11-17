@@ -56,6 +56,7 @@ APP_LOGS="/var/log/caddy/apps*.log*"
 PLAY_APPS=(
     innerpod=com.togaware.innerpod
     radiopod=com.togaware.radiopod
+    timepod=com.togaware.timepod
 )
 
 # pub.dev publishers whose packages are collected.
